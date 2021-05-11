@@ -1,0 +1,479 @@
+OpenBSD installation with Full Disk Encryption
+
+Select (S)hell at the initial prompt
+
+*
+
+Since the installer does not have many device nodes by default, make sure the /dev/sd0 device exists:
+
+# cd /dev && sh MAKEDEV sd0
+
+*
+
+You may want to write random data to the drive first with something like the following: 
+
+# dd if=/dev/urandom of=/dev/rsd0c bs=1m
+
+*
+
+If you're booting from MBR, do: 
+
+# fdisk -iy sd0
+
+*
+
+Next, create the partition layout: 
+
+# disklabel -E sd0
+Label editor (enter '?' for help at any prompt)
+sd0> a a			
+offset: [64]
+size: [39825135] *
+FS type: [4.2BSD] RAID
+sd0*> w
+sd0> q
+No label changes.
+
+*
+
+Now we can build the encrypted device on our "a" partition. 
+
+# bioctl -c C -l sd0a softraid0
+
+*
+
+# cd /dev && sh MAKEDEV sd1
+
+*
+
+As in the previous example, we'll overwrite the first megabyte of our new pseudo-device. 
+
+# dd if=/dev/zero of=/dev/rsd1c bs=1m count=1
+
+Type exit to return to the main installer, then choose this new device as the one for your installation. 
+
+[...]
+Available disks are: sd0 sd1.
+Which disk is the root disk? ('?' for details) [sd0] sd1
+
+*
+
+Choose yes to xenodm under installation
+
+*
+
+Aftersteps.
+
+First, you need to figure out the name of your ethernet interface. Run ifconfig to print the attached network interfaces. 
+
+ifconfig
+
+*
+
+If you have an Intel ethernet card, the device will probably be called em0. Otherwise, just go with whichever device shows "Ethernet" for the media field. Plug in an ethernet cable and run dhclient to get an IP address. 
+
+dhclient em0
+
+*
+
+Now you should be connected to the internet. Use the fw_update tool to download firmware for your wireless card. When run with no arguments, it will scan your hardware and install any necessary firmware packages from OpenBSD's firmware repository. 
+
+fw_update
+
+*
+
+Now you're ready to connect to WiFi. Run ifconfig again, and you should see a new wireless network interface. If you have an Intel wireless card, it will probably be called iwn0. Bring it up and scan for networks: 
+
+ifconfig iwn0 up
+ifconfig iwn0 scan
+
+*
+
+One of my favorite things about OpenBSD is how well integrated the base system is. For example, to connect to a WPA2-protected network, you can do everything with a simple ifconfig command: 
+
+ifconfig iwn0 nwid YOUR_SSID wpakey "YOUR_PASSPHRASE"
+dhclient iwn0
+
+*
+
+Assuming your wireless card is iwn0, create /etc/hostname.iwn0 with the following: 
+
+/etc/hostname.iwn0
+join "YOUR_SSID" wpakey "YOUR_PASSPHRASE"
+# you can specify other networks here too, in order of priority:
+# join "WORK_SSID" wpakey "WORK_PASSPHRASE"
+# join "OPEN_COFFEE_SHOP"
+dhcp
+inet6 autoconf
+up powersave
+
+*
+
+To test your changes, undo the manual configuration we performed and run the netstart script: 
+
+ifconfig em0 down
+ifconfig iwn0 down
+pkill dhclient
+sh /etc/netstart
+
+*
+
+The first thing to do is disable the annoying xconsole window from autostarting at each login. We'll also disable the system beep in the session manager. 
+
+sed -i 's/xconsole/#xconsole/' /etc/X11/xenodm/Xsetup_0
+echo 'xset b off' >> /etc/X11/xenodm/Xsetup_0
+
+*
+
+You can also disable the beep when logged into a virtual console, as well as remap Caps Lock to the Control key, by editing /etc/wsconsctl.conf
+
+/etc/wsconsctl.conf
+keyboard.bell.volume=0
+keyboard.map+="keysym Caps_Lock = Control_L"
+
+*
+
+Configure doas so you can run commands with elevated privileges from your normal user account. This is OpenBSD's reimagination of sudo. 
+
+echo 'permit persist keepenv YOUR_USERNAME' > /etc/doas.conf
+
+Since this is a laptop, you'll want to enable power management to save battery life: 
+
+rcctl enable apmd
+rcctl set apmd flags -A
+rcctl start apmd
+
+*
+
+Add your user to the staff group. This group has higher resource limits in login.conf. You'll need to log out and back in for this change to take effect. 
+
+usermod -G staff YOUR_USERNAME
+
+*
+
+The default resource limits in OpenBSD are extremely conservative. For running modern applications like web browsers, we'll need to bump them up significantly. Use vi to modify the staff login class in /etc/login.conf as follows. 
+
+/etc/login.conf
+staff:\
+  :datasize-cur=1024M:\
+  :datasize-max=8192M:\
+  :maxproc-cur=512:\
+  :maxproc-max=1024:\
+  :openfiles-cur=4096:\
+  :openfiles-max=8192:\
+  :stacksize-cur=32M:\
+  :ignorenologin:\
+  :requirehome@:\
+  :tc=default:
+  
+  *
+  
+  You'll need to logout and log back in for those changes to take effect. There are also some kernel sysctls we'll need to bump up for desktop use. Add the following values to /etc/sysctl.conf. The shm variables are for my laptop, which has 16 GB of RAM. You should scale them accordingly for your machine.
+
+  /etc/sysctl.conf
+  # shared memory limits (chrome needs a ton)
+  kern.shminfo.shmall=3145728
+  kern.shminfo.shmmax=2147483647
+  kern.shminfo.shmmni=1024
+
+  # semaphores
+  kern.shminfo.shmseg=1024
+  kern.seminfo.semmns=4096
+  kern.seminfo.semmni=1024
+
+  kern.maxproc=32768
+  kern.maxfiles=65535
+  kern.bufcachepercent=90
+  kern.maxvnodes=262144
+  kern.somaxconn=2048
+  
+  *
+  
+  You can greatly improve disk performance by enabling softupdates and the noatime option for all your local partitions in /etc/fstab. Add the softdep,noatime options to each partition (except swap) as I've demonstrated below. Don't copy and paste this directly, as your disk identifier will be different. 
+  
+  /etc/fstab
+  0364c44477d30004.b none swap sw
+  0364c44477d30004.a / ffs rw,softdep,noatime 1 1
+  0364c44477d30004.l /home ffs rw,softdep,noatime,nodev,nosuid 1 2
+  0364c44477d30004.d /tmp ffs rw,softdep,noatime,nodev,nosuid 1 2
+  0364c44477d30004.f /usr ffs rw,softdep,noatime,nodev 1 2
+  0364c44477d30004.g /usr/X11R6 ffs rw,softdep,noatime,nodev 1 2
+  0364c44477d30004.h /usr/local ffs rw,softdep,noatime,wxallowed,nodev 1 2
+  0364c44477d30004.k /usr/obj ffs rw,softdep,noatime,nodev,nosuid 1 2
+  0364c44477d30004.j /usr/src ffs rw,softdep,noatime,nodev,nosuid 1 2
+  0364c44477d30004.e /var ffs rw,softdep,noatime,nodev,nosuid 1 2
+  
+  *
+  
+  Since this is a laptop, you'll probably want your screen to lock automatically when you close the lid. You can configure apmd to do this for you. (Note that this won't be effective until we configure X11 in the section below.)
+
+  First, make the directory:
+  
+  mkdir /etc/apm
+  
+  Then, create the file /etc/apm/suspend with the following contents: 
+  
+  /etc/apm/suspend
+  #!/bin/sh
+  pkill -USR1 xidle
+  
+  And make it executable: 
+  
+  chmod +x /etc/apm/suspend
+  
+  *
+  
+  I'm paranoid and don't like the fact that ntpd reaches out to www.google.com of all places to sanity check each clock update. You can turn that off easily: 
+  
+  sed -i '/google/d' /etc/ntpd.conf
+  
+  Or, even better, you can replace Google with domain you feel comfortable pinging all the time. 
+  
+  sed -i 's/www\.google\.com/www.example.com/' /etc/ntpd.conf
+  
+  
+  If you do either of those, be sure to restart ntpd:
+
+  
+rcctl restart ntpd
+
+*
+
+~/.xsession
+# use UTF-8 everywhere
+export LANG=en_US.UTF-8
+
+# specify location of kshrc
+export ENV=$HOME/.kshrc
+
+# load Xresources file
+xrdb -merge $HOME/.Xresources
+
+xset b off
+
+# if you have a ThinkPad, the following lines enable TrackPoint
+# scrolling by dragging with the middle button.
+xinput set-prop "/dev/wsmouse" "WS Pointer Wheel Emulation" 1 
+xinput set-prop "/dev/wsmouse" "WS Pointer Wheel Emulation Button" 2 
+xinput set-prop "/dev/wsmouse" "WS Pointer Wheel Emulation Axes" 6 7 4 5 
+
+
+
+*
+
+~/.Xresources
+! ===== fonts
+Xft.autohint  : 0
+Xft.lcdfilter : lcddefault
+Xft.hintstyle : hintslight
+Xft.hinting   : 1
+Xft.antialias : 1
+Xft.rgba      : rgb
+! fixed is the one true font - use iso10646 for unicode characters
+*font         : -misc-fixed-medium-r-semicondensed-*-13-*-*-*-*-*-iso10646-1
+
+! ===== xlock
+! actually turn the backlight off
+XLock.dpmsoff     : 1
+! plain white-on-black lock screen
+XLock.description : off
+XLock.echokeys    : off
+XLock.info        :
+XLock.background  : black
+XLock.foreground  : white
+XLock.mode        : blank
+XLock.username    : username: 
+XLock.password    : password: 
+XLock.font        : -misc-fixed-medium-r-normal-*-15-*-*-*-*-*-iso10646-1
+XLock.planfont    : -misc-fixed-medium-r-normal-*-13-*-*-*-*-*-iso10646-1
+
+*
+
+OpenBSD's GTK port is built with the default key theme set to emacs (heresy!). This means that normal key shortcuts (like Ctrl-A to select all) don't work. You can fix that by changing the gtk-key-theme-name in the GTK configuration. First, make the directory: 
+
+mkdir -p ~/.config/gtk-3.0
+
+
+*
+
+Then create the file settings.ini with your desired customizations. Here's what I use: 
+
+~/.config/gtk-3.0/settings.ini
+[Settings]
+gtk-theme-name=Adwaita
+gtk-icon-theme-name=Adwaita
+gtk-font-name=Arimo 9
+gtk-toolbar-style=GTK_TOOLBAR_ICONS
+gtk-toolbar-icon-size=GTK_ICON_SIZE_SMALL_TOOLBAR
+gtk-button-images=1
+gtk-menu-images=1
+gtk-enable-event-sounds=1
+gtk-enable-input-feedback-sounds=1
+gtk-xft-antialias=1
+gtk-xft-hinting=1
+gtk-xft-hintstyle=hintslight
+gtk-xft-rgba=rgb
+gtk-cursor-theme-size=0
+gtk-cursor-theme-name=Default
+gtk-key-theme-name=Default
+
+
+*
+
+Finally, get yourself some decent looking fonts. Edit ~/.config/fontconfig/fonts.conf: 
+
+~/.config/fontconfig/fonts.conf
+<?xml version="1.0"?>
+<!DOCTYPE fontconfig SYSTEM "fonts.dtd">
+<fontconfig>
+  <!-- hinting/antialiasing settings -->
+  <match target="font">
+    <edit mode="assign" name="antialias">
+      <bool>true</bool>
+    </edit>
+    <edit mode="assign" name="hinting">
+      <bool>true</bool>
+    </edit>
+    <edit mode="assign" name="hintstyle">
+      <const>hintslight</const>
+    </edit>
+    <edit mode="assign" name="lcdfilter">
+      <const>lcddefault</const>
+    </edit>
+    <edit mode="assign" name="rgba">
+      <const>rgb</const>
+    </edit>
+  </match>
+
+  <!-- preferred fonts (first match will be used) -->
+  <alias>
+    <family>sans-serif</family>
+    <prefer>
+      <family>Arimo</family>
+      <family>Liberation Sans</family>
+      <family>DejaVu Sans</family>
+    </prefer>
+  </alias>
+  <alias>
+    <family>serif</family>
+    <prefer>
+      <family>Tinos</family>
+      <family>Liberation Serif</family>
+      <family>DejaVu Serif</family>
+    </prefer>
+  </alias>
+  <alias>
+    <family>monospace</family>
+    <prefer>
+      <family>Cousine</family>
+      <family>Liberation Mono</family>
+      <family>DejaVu Sans Mono</family>
+    </prefer>
+  </alias>
+</fontconfig>
+
+*
+
+The default modesetting driver doesn't use vsync, so you'll get a lot of tearing when scrolling webpages or watching videos. If you have an Intel-based video chipset, you can switch to the intel driver to get smooth video.
+
+Create the /etc/X11/xorg.conf.d directory:
+
+mkdir /etc/X11/xorg.conf.d
+
+Then, create intel.conf with the following contents: 
+
+/etc/X11/xorg.conf.d/intel.conf
+Section "Device"
+  Identifier "drm"
+  Driver "intel"
+  Option "TearFree" "true"
+EndSection
+
+*
+
+Restart xenodm to restart the X server: 
+
+rcctl restart xenodm
+
+*
+
+ksh uses the $ENV environment variable to determine the location of its config file. Start by setting that in ~/.profile. 
+
+~/.profile
+export ENV=$HOME/.kshrc
+
+*
+
+To get the current battery status, just use apm.
+
+$ apm
+
+*
+
+OpenBSD releases binary patches for security issues found in the base system, which you can download and apply via the syspatch utility. Just run it as root:
+
+syspatch
+
+*
+
+Next enable and start the messagebus (aka dbus-daemon)...
+
+foo# rcctl enable messagebus
+foo# rcctl start messagebus
+
+*
+
+Finally when you start an X Window session, the server looks for a file called ~/.xsession in the root of your home drive and runs the commands in that file. Below is the contents of my .xsession file for running Xfce based on the pkg-readme...
+
+foo$ cat ~/.xsession
+# See pkg-readme for xfce
+# Dbus/message bus enabled in rc.conf.local
+# Want to be able to suspend from xfce4 logout menu
+/usr/local/bin/startxfce4 --with-ck-launch
+
+*
+
+The following commands (as root) will add the needed lines to doas.conf so that your user can mount external drives...
+
+foo# echo "permit nopass USER as root cmd mount" >> /etc/doas.conf
+foo# echo "permit nopass USER as root cmd umount" >> /etc/doas.conf
+foo# echo "permit nopass USER as root cmd ntfs-3g" >> /etc/doas.conf
+
+*
+
+Mounting a USB stick to ~/usb as user looks like this...
+
+foo$ mkdir ~/usb
+foo$ dmesg | grep sd1
+foo$ doas mount /dev/sd1i ~/usb
+
+See what the usb contains..
+
+foo$ ls ~/usb
+
+*
+
+...and I can unmount the USB stick easily...
+
+foo$ doas umount ~/usb
+foo$ ls usb
+
+*
+
+The xfce4-mount allows the mounting and unmounting of USB sticks from the xfce panel.
+
+Add an icon for the plugin to the XFCE4 panel by right-clicking on the panel and selecting Panel | Add New Items and searching for mount.
+
+By default, xfce4-mount-plugin lists all the devices including the default local hard drive including all the partitions on sd0. I can set options to prevent that and to use a custom mount command. Right click over the xfce4-mount icon and select Properties | File Systems tab. Add the pattern /dev/sd0* to the Exclude specified file systems textbox so the local drive is not listed.
+
+Right-click on the xfce4-mount icon, and select Preferences | Commands and write the following in the Custom Commands textboxes, after ensuring that the Custom Commands checkbox was ticked...
+
+doas mount %m
+doas umount %m
+
+Now to ensure that a USB stick is listed in the xfce4-mount-popup list, you have to add a line for the device to /etc/fstab...
+
+foo# echo "/dev/sd1i /home/keith/usb msdos rw,noauto 0 0" >> /etc/fstab
+
+*
+
